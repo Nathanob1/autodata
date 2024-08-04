@@ -1,0 +1,137 @@
+import re
+import json
+import ssl
+import asyncio
+import http.client
+from telethon import TelegramClient, events
+from datetime import datetime, timedelta
+
+# Your Telegram API credentials
+api_id = 
+api_hash = ''
+phone_number = '+'
+source_chat_id = -1002148118948  # Source chat ID
+
+# Set to store unique contract addresses
+contract_addresses = set()
+
+
+# Function to extract contract address from a message
+def extract_contract_address(message_text):
+    match = re.search(r'[a-zA-Z0-9]{30,50}', message_text)
+    if match:
+        return match.group(0)
+    return None
+
+
+# Function to get token price from API
+def get_token_price(contract_address, vs_token='USDC'):
+    host = 'price.jup.ag'
+    endpoint = f'/v6/price?ids={contract_address}&vsToken={vs_token}'
+
+    context = ssl._create_unverified_context()
+    try:
+        conn = http.client.HTTPSConnection(host, context=context)
+        conn.request('GET', endpoint)
+        response = conn.getresponse()
+
+        if response.status == 200:
+            data = response.read()
+            data_dict = json.loads(data)
+            conn.close()
+            # Check if the response contains data
+            if 'data' in data_dict and contract_address in data_dict['data']:
+                return data_dict['data'][contract_address]['price']
+            else:
+                print(f"[{contract_address}] No data found for this address.")
+                return None
+        else:
+            print(f"Failed to fetch data. Status code: {response.status}")
+            conn.close()
+            return None
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+
+# Function to monitor the price and print only the highest or lowest percentage changes when they change
+async def monitor_price(contract_address, vs_token='USDC', interval=1, tolerance=0.01, precision=4, monitor_duration=3*3600):
+    initial_price = None
+    highest_change = None
+    lowest_change = None
+    last_printed_highest = None
+    last_printed_lowest = None
+
+    start_time = datetime.now()
+    end_time = start_time + timedelta(seconds=monitor_duration)
+
+    while datetime.now() < end_time:
+        current_price = get_token_price(contract_address, vs_token)
+        if current_price is not None:
+            if initial_price is None:
+                # Set initial price on the first run
+                initial_price = current_price
+                print(f"[{contract_address}] Initial Price: {initial_price} {vs_token}")
+            else:
+                # Calculate the percentage change from the initial price
+                try:
+                    percentage_change = ((current_price - initial_price) / initial_price) * 100
+                except ZeroDivisionError:
+                    percentage_change = 0.0
+
+                # Round the percentage change to the specified precision
+                rounded_percentage_change = round(percentage_change, precision)
+
+                # Update the highest and lowest changes
+                if highest_change is None or rounded_percentage_change > highest_change:
+                    highest_change = rounded_percentage_change
+
+                if lowest_change is None or rounded_percentage_change < lowest_change:
+                    lowest_change = rounded_percentage_change
+
+                # Print only if there is a significant change
+                if highest_change != last_printed_highest:
+                    print(f"[{contract_address}] Highest Change: {highest_change:.{precision}f}%")
+                    last_printed_highest = highest_change
+
+                if lowest_change != last_printed_lowest:
+                    print(f"[{contract_address}] Lowest Change: {lowest_change:.{precision}f}%")
+                    last_printed_lowest = lowest_change
+        else:
+            print(f"[{contract_address}] Failed to fetch the current price.")
+
+        # Wait for the specified interval before checking again
+        await asyncio.sleep(interval)
+
+    # Save the highest and lowest changes to the specified text file
+    file_path = '/path to file/data.txt'
+    with open(file_path, 'a') as file:
+        file.write(f"{contract_address}: Highest Change: {highest_change:.{precision}f}% | Lowest Change: {lowest_change:.{precision}f}%\n")
+    print(f"[{contract_address}] Monitoring complete. Results saved to {file_path}.")
+
+
+
+# Initialize the Telegram client
+client = TelegramClient('session_name', api_id, api_hash)
+
+
+# Event handler for new messages in the source chat
+@client.on(events.NewMessage(chats=source_chat_id))
+async def handler(event):
+    message_text = event.message.message
+    contract_address = extract_contract_address(message_text)
+    if contract_address and contract_address not in contract_addresses:
+        contract_addresses.add(contract_address)
+        print(f"Found new contract address: {contract_address}")
+        # Start a new task to monitor the price of this token
+        asyncio.create_task(monitor_price(contract_address))
+
+
+# Start the client
+async def main():
+    await client.start(phone_number)
+    print("Telegram client started.")
+    await client.run_until_disconnected()
+
+
+asyncio.run(main())
